@@ -1,29 +1,56 @@
 // static/app.js
 const $ = (sel) => document.querySelector(sel);
-const log = (m) => {
-  const el = $("#log");
-  el.textContent += (m + "\n");
-  el.scrollTop = el.scrollHeight;
-};
+const log = (m) => { const el = $("#log"); el.textContent += (m + "\n"); el.scrollTop = el.scrollHeight; };
 
-let uploadToken = null;   // para modo "subir archivos"
-let lastSource = "folder"; // folder | upload
-let lastFilesMeta = [];   // [{name, count, titles}]
+let uploadToken = null;    // para "subir .docx"
+let uploadDirToken = null; // para "subir carpeta"
+let lastSource = "folder"; // folder | upload | upload_dir
+let lastFilesMeta = [];    // [{name, count, titles}]
 
-function setBadges(filesCount, titlesCount) {
+// === WHITELIST (tu lista fija) ===
+const TITULOS_WHITELIST = [
+  "1. Introducción​",
+  "2. Diagnóstico estratégico",
+  "3. Misión, visión y valores de la carrera",
+  "01. Plan de formación integral del estudiante",
+  "06. Plan de admisión, acogida y acompañamiento académico de estudiantes",
+  "23. Plan de seguimiento y mejora de indicadores del perfil docente",
+  "25. Plan de formación integral del docente",
+  "26. Plan de mejora del proceso de evaluación integral docente ",
+  "03. Plan implantación del marco de competencias UTPL",
+  "04. Plan de prospectiva y creación de nueva oferta",
+  "07. Plan de acciones curriculares para el fortalecimiento de las competencias genéricas",
+  "11. Plan de fortalecimiento de prácticas preprofesionales y proyectos de vinculación",
+  "12. Plan de fortalecimiento de criterios para la evaluación de la calidad de carreras y programas académicos",
+  "13. Plan de acciones curriculares para el fortalecimiento de la empleabilidad del graduado UTPL",
+  "16. Plan de mejora del proceso de elaboración y seguimiento de planes docentes",
+  "18. Plan de mejora de ambientes de aprendizaje",
+  "19. Plan de mejora de evaluación de los aprendizajes",
+  "20. Plan de mejora del proceso de integración curricular",
+  "21. Plan de mejora del proceso de titulación",
+  "22. Plan de seguimiento y mejora de la labor tutorial",
+  "08. Plan de internacionalización del currículo",
+  "24. Plan de intervención de personal académico en territorio",
+  "05. Plan de acciones académicas orientadas a la comunicación y promoción de la oferta",
+  "09. Plan de innovación educativa",
+  "10. Plan de implantación de metodologías activas en el currículo",
+  "28. Plan de formación de líderes académicos ",
+  "29. Plan de posicionamiento institucional en innovación educativa",
+  "30. Plan de investigación sobre innovación educativa, EaD, MP"
+];
+
+function setBadges(filesCount) {
   $("#badge-archivos").textContent = `${filesCount} archivo${filesCount===1?"":"s"}`;
-  $("#badge-titulos").textContent = `${titlesCount} título${titlesCount===1?"":"s"}`;
 }
 
-function fillTitles(titles) {
-  const sel = $("#titles");
+function fillWhitelist() {
+  const sel = $("#whitelist");
   sel.innerHTML = "";
-  titles.forEach(t => {
+  TITULOS_WHITELIST.forEach(t => {
     const o = document.createElement("option");
     o.value = t; o.textContent = t;
     sel.appendChild(o);
   });
-  setBadges(lastFilesMeta.length, titles.length);
 }
 
 function drawFilesTable(filesMeta) {
@@ -53,7 +80,7 @@ function showPreview(name) {
   const ul = $("#preview-list");
   ul.innerHTML = "";
   if (!meta || !meta.titles || !meta.titles.length) {
-    ul.innerHTML = `<li class="list-group-item text-muted">No se encontraron títulos para el nivel seleccionado.</li>`;
+    ul.innerHTML = `<li class="list-group-item text-muted">Sin coincidencias con la whitelist.</li>`;
   } else {
     meta.titles.forEach(t => {
       const li = document.createElement("li");
@@ -67,17 +94,15 @@ function showPreview(name) {
 }
 
 async function scanFolder() {
-  lastSource = "folder";
-  uploadToken = null;
-  $("#titles").innerHTML = "";
-  drawFilesTable([]);
-  setBadges(0, 0);
-  log("Escaneando carpeta...");
+  lastSource = "folder"; uploadToken = null; uploadDirToken = null;
+  $("#whitelist").selectedIndex = -1;
+  drawFilesTable([]); setBadges(0);
+  log("Escaneando carpeta en servidor...");
 
   const body = {
     folder: $("#folder").value.trim(),
     include_subs: $("#include_subs").checked,
-    level: parseInt($("#level").value, 10)
+    whitelist: TITULOS_WHITELIST
   };
   const res = await fetch("/api/scan-folder", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -86,21 +111,20 @@ async function scanFolder() {
   const js = await res.json();
   if (!js.ok) { log("ERROR: " + (js.error || res.status)); return; }
   lastFilesMeta = js.files_meta || [];
-  log(`Archivos: ${js.count} | Títulos (únicos, nivel) : ${js.titles.length}`);
-  fillTitles(js.titles || []);
+  setBadges(js.count || 0);
   drawFilesTable(lastFilesMeta);
+  log(`Archivos: ${js.count} | títulos totales en whitelist: ${TITULOS_WHITELIST.length}`);
 }
 
 async function scanUpload() {
-  lastSource = "upload";
-  $("#titles").innerHTML = "";
-  drawFilesTable([]);
-  setBadges(0, 0);
+  lastSource = "upload"; uploadDirToken = null;
+  $("#whitelist").selectedIndex = -1;
+  drawFilesTable([]); setBadges(0);
   const files = $("#files").files;
   if (!files || !files.length) { log("Selecciona .docx primero."); return; }
   log(`Subiendo ${files.length} archivo(s)...`);
   const fd = new FormData();
-  fd.append("level", $("#level").value);
+  TITULOS_WHITELIST.forEach(t => fd.append("whitelist[]", t));
   for (const f of files) fd.append("files", f);
 
   const res = await fetch("/api/scan-upload", { method: "POST", body: fd });
@@ -108,33 +132,59 @@ async function scanUpload() {
   if (!js.ok) { log("ERROR: " + (js.error || res.status)); return; }
   uploadToken = js.token;
   lastFilesMeta = js.files_meta || [];
-  log(`Token: ${uploadToken} | Archivos: ${js.count} | Títulos (únicos): ${js.titles.length}`);
-  fillTitles(js.titles || []);
+  setBadges(js.count || 0);
   drawFilesTable(lastFilesMeta);
+  log(`Token: ${uploadToken} | Archivos: ${js.count}`);
+}
+
+async function scanUploadDir() {
+  lastSource = "upload_dir"; uploadToken = null;
+  $("#whitelist").selectedIndex = -1;
+  drawFilesTable([]); setBadges(0);
+  const files = $("#folderInput").files;
+  if (!files || !files.length) { log("Selecciona una carpeta con .docx."); return; }
+  log(`Subiendo carpeta con ${files.length} archivo(s)...`);
+  const fd = new FormData();
+  TITULOS_WHITELIST.forEach(t => fd.append("whitelist[]", t));
+  for (const f of files) {
+    if (f.name.toLowerCase().endsWith(".docx")) {
+      fd.append("files", f);
+    }
+  }
+  const res = await fetch("/api/scan-upload", { method: "POST", body: fd });
+  const js = await res.json();
+  if (!js.ok) { log("ERROR: " + (js.error || res.status)); return; }
+  uploadDirToken = js.token;
+  lastFilesMeta = js.files_meta || [];
+  setBadges(js.count || 0);
+  drawFilesTable(lastFilesMeta);
+  log(`Token: ${uploadDirToken} | Archivos: ${js.count}`);
 }
 
 async function mergeNow() {
   const mode = document.querySelector('input[name="mode"]:checked').value; // unificado | grouped
   const use_all = $("#use_all").checked;
-  const level = parseInt($("#level").value, 10);
   let selected = [];
   if (!use_all) {
-    selected = Array.from($("#titles").selectedOptions).map(o => o.value);
+    selected = Array.from($("#whitelist").selectedOptions).map(o => o.value);
     if (!selected.length) { log("Selecciona al menos un título o marca 'Usar todos'."); return; }
+  } else {
+    selected = TITULOS_WHITELIST.slice();
   }
 
-  const payload = {
-    source: lastSource, mode, level, use_all, titles: selected
-  };
+  const payload = { source: lastSource, mode, titles: selected };
 
   if (lastSource === "folder") {
     const folder = $("#folder").value.trim();
     if (!folder) { log("Ingresa la ruta de la carpeta."); return; }
     payload.folder = folder;
     payload.include_subs = $("#include_subs").checked;
-  } else {
+  } else if (lastSource === "upload") {
     if (!uploadToken) { log("Primero sube y escanea archivos."); return; }
     payload.token = uploadToken;
+  } else {
+    if (!uploadDirToken) { log("Primero sube y escanea la carpeta."); return; }
+    payload.token = uploadDirToken;
   }
 
   log("Generando ZIP...");
@@ -160,38 +210,33 @@ async function mergeNow() {
 }
 
 async function cleanup() {
-  if (!uploadToken) { log("No hay subidas por limpiar."); return; }
+  const token = uploadToken || uploadDirToken;
+  if (!token) { log("No hay subidas por limpiar."); return; }
   await fetch("/api/cleanup", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token: uploadToken })
+    body: JSON.stringify({ token })
   });
-  uploadToken = null;
+  uploadToken = null; uploadDirToken = null;
   log("Subidas temporales limpiadas.");
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  fillWhitelist();
   $("#btn-scan-folder").addEventListener("click", scanFolder);
   $("#btn-scan-upload").addEventListener("click", scanUpload);
+  $("#btn-scan-upload-dir").addEventListener("click", scanUploadDir);
   $("#btn-merge").addEventListener("click", mergeNow);
   $("#btn-clean").addEventListener("click", cleanup);
 
-  $("#level").addEventListener("change", () => {
-    $("#titles").innerHTML = "";
-    drawFilesTable([]);
-    setBadges(0, 0);
-    log("Nivel cambiado: vuelve a Escanear títulos.");
-  });
-
-  $("#use_all").addEventListener("change", (e) => {
-    if (e.target.checked) {
-      for (const opt of $("#titles").options) opt.selected = false;
-    }
-  });
-
-  // Delegación para botón "Ver títulos"
   $("#files-table").addEventListener("click", (ev) => {
     const btn = ev.target.closest("button[data-action='preview']");
     if (!btn) return;
     showPreview(btn.dataset.name);
+  });
+
+  $("#use_all").addEventListener("change", (e) => {
+    if (e.target.checked) {
+      for (const opt of $("#whitelist").options) opt.selected = false;
+    }
   });
 });
