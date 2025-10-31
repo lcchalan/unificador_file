@@ -1,324 +1,446 @@
-import os
+# lector_file.py
+# -*- coding: utf-8 -*-
+"""
+Lógica de procesamiento para combinar contenidos de varios .docx por títulos (H1/H2/H3),
+pensada para ejecutarse en servidor (stateless, todo en memoria).
+
+APIs expuestas:
+- headings_from_docx(content_bytes) -> List[Dict]
+- procesar(archivos, niveles, titulos_whitelist, enforce_whitelist=False) -> Dict[str, bytes]
+- procesar_grouped(archivos, level, titulos_whitelist, enforce_whitelist=False) -> Dict[str, bytes]
+
+Donde:
+- archivos: List[{"name": str, "content": bytes}]
+- niveles: List[int]   (ej. [1,2,3])
+- titulos_whitelist: List[str] (si vacío => no se filtra por texto)
+- enforce_whitelist: si True, sólo incluye títulos exactamente en whitelist; si False, whitelist sirve de filtro opcional.
+
+Dependencias: python-docx, openpyxl, lxml
+"""
+
+from __future__ import annotations
+import io
 import re
-import shutil
-import tempfile
 import unicodedata
-from collections import defaultdict
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Iterable
 
 from docx import Document
-from docx.table import Table
+from docx.document import Document as _DocxDocument
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docxcompose.composer import Composer
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+import pandas as pd
 
-# ----------------------
-# Rutas
-# ----------------------
-# Usa variables de entorno si existen; si no, usa rutas locales y seguras
-
-RUTA_ENTRADA = os.getenv("INPUT_DIR", os.path.join(os.getcwd(), "data_in"))
-RUTA_SALIDA  = os.getenv("OUTPUT_DIR", os.path.join(os.getcwd(), "tmp", "out"))
-
-def ensure_dirs():
-    os.makedirs(RUTA_SALIDA, exist_ok=True)
-
-# ----------------------
-# Índice de TÍTULOS (con numeración)
-# ----------------------
-TITULOS_RAW = """
-01. Plan de formación integral del estudiante
-06. Plan de admisión, acogida y acompañamiento académico de estudiantes
-23. Plan de seguimiento y mejora de indicadores del perfil docente
-25. Plan de formación integral del docente
-26. Plan de mejora del proceso de evaluación integral docente 
-03. Plan implantación del marco de competencias UTPL
-04. Plan de prospectiva y creación de nueva oferta
-07. Plan de acciones curriculares para el fortalecimiento de las competencias genéricas
-11. Plan de fortalecimiento de prácticas preprofesionales y proyectos de vinculación
-12. Plan de fortalecimiento de criterios para la evaluación de la calidad de carreras y programas académicos
-13. Plan de acciones curriculares para el fortalecimiento de la empleabilidad del graduado UTPL
-16. Plan de mejora del proceso de elaboración y seguimiento de planes docentes
-18. Plan de mejora de ambientes de aprendizaje
-19. Plan de mejora de evaluación de los aprendizajes
-20. Plan de mejora del proceso de integración curricular
-21. Plan de mejora del proceso de titulación
-22. Plan de seguimiento y mejora de la labor tutorial
-08. Plan de internacionalización del currículo
-24. Plan de intervención de personal académico en territorio
-05. Plan de acciones académicas orientadas a la comunicación y promoción de la oferta
-09. Plan de innovación educativa
-10. Plan de implantación de metodologías activas en el currículo
-28. Plan de formación de líderes académicos 
-29. Plan de posicionamiento institucional en innovación educativa
-30. Plan de investigación sobre innovación educativa, EaD, MP
-""".strip()
-
-# ----------------------
+# ---------------------------
 # Utilidades
-# ----------------------
-def quitar_acentos(texto: str) -> str:
-    if texto is None:
+# ---------------------------
+
+def _to_docx(content_bytes: bytes) -> _DocxDocument:
+    bio = io.BytesIO(content_bytes)
+    return Document(bio)
+
+def _save_docx_to_bytes(doc: _DocxDocument) -> bytes:
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+def _normalize_text(s: str) -> str:
+    if s is None:
         return ""
-    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+    s2 = unicodedata.normalize("NFKC", s)
+    return re.sub(r"\s+", " ", s2).strip()
 
-def norm_str(s: str) -> str:
-    s = (s or "").strip()
-    s = quitar_acentos(s.lower())
-    s = re.sub(r"\s+", " ", s)
-    return s
+def _is_heading(paragraph: Paragraph) -> Tuple[bool, Optional[int]]:
+    """
+    Detecta si un párrafo es encabezado y devuelve (es_heading, nivel).
+    Soporta estilos en ES/EN típicos (Título 1/Heading 1, etc).
+    """
+    style = paragraph.style.name if paragraph.style is not None else ""
+    txt = (paragraph.text or "").strip()
 
-def quitar_numeracion_inicio(s: str):
-    """Devuelve (numero_str|'' , texto_sin_numeracion). Acepta '01. ', '1) ', '12 - ', etc."""
-    m = re.match(r"^\s*(\d{1,3})\s*[-\.\)]\s*(.*)$", s.strip())
+    # Preferencia: documenta el nivel directo si lo provee python-docx
+    # (No siempre disponible, depende de la plantilla)
+    # Fallback: estilo por nombre.
+    level = None
+
+    # Reglas por nombre de estilo (comunes en Word ES/EN)
+    style_norm = style.lower()
+    m = re.search(r"(heading|encabezado|t[íi]tulo)\s*(\d+)", style_norm)
     if m:
-        return m.group(1), m.group(2).strip()
-    return "", s.strip()
+        try:
+            level = int(m.group(2))
+        except Exception:
+            level = None
 
-def es_docx_valido(nombre: str) -> bool:
-    return nombre.lower().endswith(".docx") and not (nombre.startswith("~$") or nombre.startswith("."))
+    # A veces hay estilos "Heading 1 Char" (caracter), ignorar
+    if "char" in style_norm and level is not None:
+        # si es Char, no lo consideramos heading estructural
+        return False, None
 
-def iter_block_items(doc: Document):
-    """Itera bloques del body (párrafos y tablas) preservando orden y devolviendo (tipo, bloque, elem)."""
-    body = doc._element.body
-    for child in list(body.iterchildren()):
-        if child.tag.endswith('p'):
-            yield ('p', Paragraph(child, doc), child)
-        elif child.tag.endswith('tbl'):
-            yield ('t', Table(child, doc), child)
+    if level is not None and 1 <= level <= 9:
+        return True, level
 
-def extraer_tabla_2d(tbl: Table) -> List[List[str]]:
-    data = []
-    for row in tbl.rows:
-        fila = []
-        for cell in row.cells:
-            fila.append((cell.text or "").strip())
-        data.append(fila)
-    return data
+    # Último recurso: si el párrafo tiene outline_level en el XML (no siempre accesible)
+    # (python-docx no lo expone fácilmente; lo omitimos para robustez)
 
-def sanitizar_nombre(nombre: str) -> str:
-    nombre = (nombre or "").strip()
-    nombre = re.sub(r"[\\/*?\"<>|:]", "_", nombre)
-    nombre = re.sub(r"\s+", "_", nombre)
-    return nombre[:180]
+    return False, None
 
-# ----------------------*****
-# Preparar lista y mapa de títulos
-# - Detectamos comparando texto SIN numeración (normalizado).
-# - Mostramos y guardamos con numeración: "01 Plan de ..."
-# ----------------------
-titulos_display: List[str] = []               # "01 Plan de …" (con número, sin punto)
-TITULOS_NORM_MAP: Dict[str, str] = {}         # norm("Plan de …") -> "01 Plan de …"
-
-for linea in TITULOS_RAW.splitlines():
-    linea = linea.strip()
-    if not linea:
-        continue
-    num, texto = quitar_numeracion_inicio(linea)
-    if not texto:
-        continue
-    display = (f"{int(num):02d} {texto}") if num else texto
-    titulos_display.append(display)
-    TITULOS_NORM_MAP[norm_str(texto)] = display
-
-def es_titulo_de_indice(parrafo: Paragraph) -> str:
-    """Si el párrafo coincide con un título (ignorando numeración/acento/caso), retorna el título DISPLAY (con número)."""
-    txt = (parrafo.text or "").strip()
-    if not txt:
-        return ""
-    _, sin_num = quitar_numeracion_inicio(txt)
-    key = norm_str(sin_num)
-    return TITULOS_NORM_MAP.get(key, "")
-
-# ----------------------
-# Paso 1: Indexar por TÍTULO (display) los índices de p/t por archivo y recolectar tablas
-#         + matriz de presencia por archivo/título
-# ----------------------
-secciones_idx: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))  # titulo_display -> archivo -> [idx_local_pt]
-tablas_por_titulo: Dict[str, List[Tuple[str, List[List[str]]]]] = defaultdict(list)
-
-archivos_analizados: List[str] = []
-found_titles_by_file: Dict[str, set] = defaultdict(set)  # archivo -> {titulo_display encontrados}
-archivos_sin_titulos: List[str] = []                    # archivos que no contenían ningún título
-
-for archivo in sorted(os.listdir(ruta_entrada)):
-    if not es_docx_valido(archivo):
-        continue
-    archivos_analizados.append(archivo)
-
-    ruta_arch = os.path.join(ruta_entrada, archivo)
-    try:
-        doc = Document(ruta_arch)
-    except Exception as e:
-        print(f"⚠️ No se pudo abrir '{archivo}': {e}")
-        continue
-
-    titulo_actual = None
-    any_title_found = False
-
-    # lista local de SOLO p/t para indexar por posición local
-    pt_elems: List[Tuple[str, object, object]] = []
-    for tipo, bloque, elem in iter_block_items(doc):
-        if tipo in ('p', 't'):
-            pt_elems.append((tipo, bloque, elem))
-
-    for local_idx, (tipo, bloque, elem) in enumerate(pt_elems):
-        if tipo == 'p':
-            maybe_title = es_titulo_de_indice(bloque)
-            if maybe_title:
-                titulo_actual = maybe_title
-                any_title_found = True
-                found_titles_by_file[archivo].add(maybe_title)  # <- MARCAMOS PRESENCIA
-                _ = secciones_idx[titulo_actual][archivo]
-                continue  # el párrafo del título no se guarda como contenido
-
-        if titulo_actual:
-            secciones_idx[titulo_actual][archivo].append(local_idx)
-            if tipo == 't':
-                tablas_por_titulo[titulo_actual].append((archivo, extraer_tabla_2d(bloque)))
-
-    if not any_title_found:
-        archivos_sin_titulos.append(archivo)
-
-# ----------------------
-# Paso 2: Por cada TÍTULO, construir DOCX uniendo fragmentos por archivo (docxcompose)
-# ----------------------
-for titulo_display, archivos_pos in secciones_idx.items():
-    frag_paths: List[str] = []
-
-    for archivo, posiciones_keep_local in archivos_pos.items():
-        if not posiciones_keep_local:
-            continue
-
-        src_path = os.path.join(ruta_entrada, archivo)
-        tmp_dir = tempfile.mkdtemp(prefix="frag_")
-        frag_path = os.path.join(tmp_dir, f"frag_{archivo}")
-        shutil.copyfile(src_path, frag_path)
-
-        frag_doc = Document(frag_path)
-        body = frag_doc._element.body
-
-        # reconstruir lista SOLO de p/t en el fragmento
-        pt_elems_doc: List[object] = []
-        for ch in list(body.iterchildren()):
-            if ch.tag.endswith('p') or ch.tag.endswith('tbl'):
-                pt_elems_doc.append(ch)
-
-        if not pt_elems_doc:
-            continue
-
-        keep_set = set(posiciones_keep_local)
-
-        # borrar p/t no deseados (de atrás adelante)
-        for local_idx in range(len(pt_elems_doc) - 1, -1, -1):
-            if local_idx not in keep_set:
-                ch = pt_elems_doc[local_idx]
-                if ch in body:
-                    body.remove(ch)
-
-        # si quedó algo de contenido útil
-        quedo_contenido = any(ch.tag.endswith('p') or ch.tag.endswith('tbl') for ch in body.iterchildren())
-        if not quedo_contenido:
-            continue
-
-        # insertar rótulo "Nombre del archivo" al inicio
-        p = frag_doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(archivo)
-        r.bold = True
-        p_elem = p._p
-        if p_elem in body:
-            body.remove(p_elem)
-        body.insert(0, p_elem)
-
-        frag_doc.save(frag_path)
-        frag_paths.append(frag_path)
-
-    # unir fragmentos si hay
-    out_docx = os.path.join(ruta_salida, f"{sanitizar_nombre(titulo_display)}.docx")
-    if frag_paths:
-        base = Document()
-        composer = Composer(base)
-        for fp in frag_paths:
-            composer.append(Document(fp))
-        composer.save(out_docx)
+def _iter_block_items(parent) -> Iterable:
+    """
+    Itera en orden real del documento: párrafos y tablas.
+    parent: Document o _Cell
+    Retorna Paragraph o Table.
+    """
+    if isinstance(parent, _DocxDocument):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
     else:
-        d = Document()
-        d.add_heading(titulo_display, level=1)
-        d.add_paragraph("No se encontró contenido para este título en los archivos analizados.")
-        d.save(out_docx)
+        raise ValueError("Tipo de padre no soportado para iteración")
 
-    # Excel por título (solo tablas)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Tablas"
-    fila = 1
-    bold = Font(bold=True)
-    center = Alignment(horizontal="center")
-    total_tablas = 0
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
 
-    if titulo_display in tablas_por_titulo:
-        for archivo_tab, data in tablas_por_titulo[titulo_display]:
-            if not data:
+def _copy_paragraph(dst_doc: _DocxDocument, p: Paragraph):
+    # Copiamos sólo texto y formato mínimo (negritas/cursivas subyacentes no se preservan completamente).
+    # Para servidor estable, esto es suficiente.
+    new_p = dst_doc.add_paragraph()
+    text = p.text or ""
+    if text:
+        new_p.add_run(text)
+
+def _copy_table_as_text(dst_doc: _DocxDocument, tbl: Table):
+    """
+    Como copiar tablas 1:1 en python-docx no es trivial (copiar XML),
+    aquí volcamos cada fila como texto CSV-like. Suficiente para contexto.
+    (Además exportamos las tablas reales a Excel por separado.)
+    """
+    rows = []
+    for r in tbl.rows:
+        row_vals = []
+        for c in r.cells:
+            row_vals.append(_normalize_text(c.text))
+        rows.append(row_vals)
+    if not rows:
+        return
+    # Insertamos un bloque con el "texto" de la tabla
+    dst_doc.add_paragraph("")  # separador
+    for row in rows:
+        dst_doc.add_paragraph(" | ".join(row))
+    dst_doc.add_paragraph("")  # separador
+
+def _sanitize_filename(name: str) -> str:
+    name = _normalize_text(name)
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    name = name.strip(" .")
+    if not name:
+        name = "archivo"
+    if not name.lower().endswith(".docx"):
+        name += ".docx"
+    return name
+
+# ---------------------------
+# Extracción de encabezados
+# ---------------------------
+
+def headings_from_docx(content_bytes: bytes) -> List[Dict]:
+    """
+    Retorna lista de dicts: [{"level": int, "text": str}, ...] en orden.
+    """
+    doc = _to_docx(content_bytes)
+    out = []
+    for block in _iter_block_items(doc):
+        if isinstance(block, Paragraph):
+            is_h, lvl = _is_heading(block)
+            if is_h:
+                out.append({"level": int(lvl), "text": _normalize_text(block.text)})
+    return out
+
+# ---------------------------
+# Segmentación por secciones de encabezado
+# ---------------------------
+
+def _split_sections_by_levels(doc: _DocxDocument, include_levels: List[int]) -> List[Dict]:
+    """
+    Divide el documento en secciones a partir de encabezados cuyos niveles estén en include_levels.
+    Cada sección = {"level": int, "title": str, "content": List[Union[Paragraph, Table]]}
+    El contenido incluye los bloques desde el título hasta ANTES del siguiente título de nivel
+    igual o menor (clásico "sección").
+    """
+    sections: List[Dict] = []
+    current = None
+    current_level_stack: List[int] = []
+
+    # Recopilamos todos los encabezados (para cortes)
+    for block in _iter_block_items(doc):
+        if isinstance(block, Paragraph):
+            is_h, lvl = _is_heading(block)
+            if is_h:
+                title = _normalize_text(block.text)
+
+                # Si el nivel del heading está en los que consideramos "inicio de sección"
+                # abrimos una nueva sección
+                if lvl in include_levels:
+                    # cerrar la actual
+                    if current:
+                        sections.append(current)
+                    current = {"level": int(lvl), "title": title, "content": []}
+                    current_level_stack = [lvl]
+                    continue
+
+                # Si es encabezado pero no está en include_levels, podría marcar fin de la sección
+                # Si aparece un heading de nivel <= nivel de la sección actual, cerramos
+                if current and lvl <= current["level"]:
+                    sections.append(current)
+                    current = None
+                    current_level_stack = []
+
+                # Si no estamos dentro de sección que capture, seguimos
+                # (los contenidos fuera de secciones seleccionadas no se incluyen)
+            else:
+                # párrafo normal
+                if current:
+                    current["content"].append(block)
+
+        elif isinstance(block, Table):
+            if current:
+                current["content"].append(block)
+
+    if current:
+        sections.append(current)
+
+    return sections
+
+def _collect_tables_from_sections(sections: List[Dict]) -> List[Tuple[str, List[List[str]]]]:
+    """
+    Extrae tablas de las secciones (como matrices de texto).
+    Retorna lista de tuplas: (title, rows[list[list[str]]])
+    """
+    out = []
+    for sec in sections:
+        title = sec["title"]
+        for b in sec["content"]:
+            if isinstance(b, Table):
+                rows = []
+                for r in b.rows:
+                    row_vals = []
+                    for c in r.cells:
+                        row_vals.append(_normalize_text(c.text))
+                    rows.append(row_vals)
+                if rows:
+                    out.append((title, rows))
+    return out
+
+# ---------------------------
+# Export: Excel (tablas)
+# ---------------------------
+
+def _excel_from_tables(all_tables: List[Tuple[str, List[List[str]]]]) -> bytes:
+    """
+    Crea un Excel con una hoja por tabla encontrada.
+    Hoja: "Tabla_001 - <titulo recortado>"
+    """
+    if not all_tables:
+        # Excel vacío con hoja "Tablas" indicando que no hay
+        with pd.ExcelWriter(io.BytesIO(), engine="openpyxl") as writer:
+            df = pd.DataFrame([{"info": "No se encontraron tablas"}])
+            df.to_excel(writer, index=False, sheet_name="Tablas")
+            bio = writer.book.properties  # fuerza escritura
+        # Re-crear para obtener bytes (truco)
+        bio2 = io.BytesIO()
+        with pd.ExcelWriter(bio2, engine="openpyxl") as writer2:
+            df.to_excel(writer2, index=False, sheet_name="Tablas")
+        return bio2.getvalue()
+
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        for idx, (title, rows) in enumerate(all_tables, start=1):
+            # Normalizamos en DataFrame (relleno desigual)
+            max_cols = max(len(r) for r in rows) if rows else 0
+            norm_rows = [r + [""]*(max_cols - len(r)) for r in rows]
+            df = pd.DataFrame(norm_rows)
+            # nombre de hoja
+            t = _normalize_text(title)
+            t = (t[:22] + "…") if len(t) > 23 else t
+            sheet = f"Tabla_{idx:03d}"
+            if t:
+                sheet = f"{sheet}_{t}"
+            # Excel limita a 31 chars
+            sheet = sheet[:31]
+            df.to_excel(writer, index=False, header=False, sheet_name=sheet)
+    return bio.getvalue()
+
+# ---------------------------
+# Export: DOCX (unificado / agrupado)
+# ---------------------------
+
+def _append_section_to_doc(dst: _DocxDocument, source_name: str, section: Dict):
+    # Encabezado de documento → título de la sección
+    # Añadimos también el nombre del archivo fuente (pequeño) para trazabilidad
+    title = section["title"]
+    lvl = section["level"]
+
+    # Heading apropiado (Word usa 0-9; python-docx admite 0..9)
+    # Usamos nivel 1 siempre para visibilidad, y ponemos (Hn) en texto
+    dst.add_heading(f"{title}", level=1)
+    dst.add_paragraph(f"[Fuente: {source_name}]").italic = True
+
+    for b in section["content"]:
+        if isinstance(b, Paragraph):
+            _copy_paragraph(dst, b)
+        elif isinstance(b, Table):
+            _copy_table_as_text(dst, b)
+    dst.add_paragraph("")  # separador
+
+def _merge_unificado(archivos: List[Dict], niveles: List[int],
+                     titles_whitelist: List[str], enforce_whitelist: bool) -> Tuple[bytes, bytes]:
+    """
+    Crea un único DOCX con todas las secciones coincidentes de todos los documentos.
+    Además retorna un Excel con todas las tablas encontradas en esas secciones.
+    """
+    out_doc = Document()
+    out_doc.add_heading("Documento Unificado", level=0)
+
+    all_tables: List[Tuple[str, List[List[str]]]] = []
+
+    wl_norm = set(_normalize_text(t) for t in (titles_whitelist or []))
+
+    for item in archivos:
+        src_name = item.get("name", "archivo.docx")
+        doc = _to_docx(item["content"])
+        sections = _split_sections_by_levels(doc, niveles)
+
+        # Filtrado por whitelist (si corresponde)
+        if enforce_whitelist and wl_norm:
+            sections = [s for s in sections if _normalize_text(s["title"]) in wl_norm]
+        elif wl_norm:
+            # Modo filtro-suave: si hay whitelist (no vacía), incluimos sólo los títulos listados
+            sections = [s for s in sections if _normalize_text(s["title"]) in wl_norm]
+
+        # Volcado
+        for sec in sections:
+            _append_section_to_doc(out_doc, src_name, sec)
+
+        # Tablas para Excel
+        all_tables.extend(_collect_tables_from_sections(sections))
+
+    docx_bytes = _save_docx_to_bytes(out_doc)
+    xlsx_bytes = _excel_from_tables(all_tables)
+    return docx_bytes, xlsx_bytes
+
+def _merge_grouped_by_title(archivos: List[Dict], level: int,
+                            titles_whitelist: List[str], enforce_whitelist: bool) -> Dict[str, bytes]:
+    """
+    Crea un DOCX por cada título (del nivel dado) agregando el contenido proveniente
+    de todos los documentos que tengan ese título.
+    Retorna: {"<titulo>.docx": bytes, ...}
+    """
+    wl_norm = set(_normalize_text(t) for t in (titles_whitelist or []))
+    # Mapa título -> lista de secciones (de varios docs)
+    grouped: Dict[str, List[Tuple[str, Dict]]] = {}
+
+    for item in archivos:
+        src_name = item.get("name", "archivo.docx")
+        doc = _to_docx(item["content"])
+        sections = _split_sections_by_levels(doc, [level])
+
+        for sec in sections:
+            tnorm = _normalize_text(sec["title"])
+            if enforce_whitelist and wl_norm and tnorm not in wl_norm:
                 continue
-            ncols = max((len(r) for r in data), default=1)
-            ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=max(1, ncols))
-            c = ws.cell(row=fila, column=1, value=archivo_tab)
-            c.font = bold
-            c.alignment = center
-            fila += 1
-            for r in data:
-                for j, val in enumerate(r, start=1):
-                    ws.cell(row=fila, column=j, value=val)
-                fila += 1
-            fila += 1
-            total_tablas += 1
+            if wl_norm and tnorm not in wl_norm:
+                # filtro-suave: si se proporcionó whitelist, incluimos solo listados
+                continue
+            grouped.setdefault(tnorm, []).append((src_name, sec))
 
-    if total_tablas == 0:
-        ws.cell(row=1, column=1, value="No se encontraron tablas en este título.")
+    # Construcción de documentos finales
+    out: Dict[str, bytes] = {}
+    for title, items in grouped.items():
+        if not title:
+            continue
+        d = Document()
+        d.add_heading(title, level=0)
+        for (src_name, sec) in items:
+            _append_section_to_doc(d, src_name, sec)
+        out[_sanitize_filename(f"{title}.docx")] = _save_docx_to_bytes(d)
 
-    out_xlsx = os.path.join(ruta_salida, f"{sanitizar_nombre(titulo_display)}.xlsx")
-    wb.save(out_xlsx)
+    return out
 
-# ----------------------
-# Paso 3: Reporte detallado de ausencias
-# ----------------------
-reporte_path = os.path.join(ruta_salida, "reporte_ausencias_titulos.txt")
-with open(reporte_path, "w", encoding="utf-8") as f:
-    # A) Archivos sin ningún título
-    f.write("A) Archivos sin ningún título del índice:\n")
-    if archivos_sin_titulos:
-        for nombre in archivos_sin_titulos:
-            f.write(f"- {nombre}\n")
-    else:
-        f.write("  (Todos los archivos contienen al menos un título del índice)\n")
-    f.write("\n")
+# ---------------------------
+# Funciones públicas
+# ---------------------------
 
-    # B) Por archivo → títulos faltantes
-    f.write("B) Por archivo → títulos faltantes:\n")
-    all_titles_set = set(titulos_display)
-    for archivo in archivos_analizados:
-        found = found_titles_by_file.get(archivo, set())
-        faltantes = sorted(all_titles_set - found)
-        if faltantes:
-            f.write(f"- {archivo}\n")
-            for t in faltantes:
-                f.write(f"    · Falta: {t}\n")
-    f.write("\n")
+def procesar(archivos: List[Dict],
+             niveles: List[int],
+             titulos_whitelist: List[str],
+             enforce_whitelist: bool = False) -> Dict[str, bytes]:
+    """
+    Modo UNIFICADO: regresa {"unificado.docx": bytes, "tablas.xlsx": bytes}
+    - niveles: ej. [1,2,3]
+    - titulos_whitelist: [] para todos; si no vacío, se usa como filtro de inclusión.
+    - enforce_whitelist: si True, sólo incluye exactamente títulos en whitelist.
+    """
+    docx_bytes, xlsx_bytes = _merge_unificado(archivos, niveles, titulos_whitelist, enforce_whitelist)
+    return {
+        "unificado.docx": docx_bytes,
+        "tablas.xlsx": xlsx_bytes
+    }
 
-    # C) Por título → archivos donde falta
-    f.write("C) Por título → archivos donde falta:\n")
-    files_set = set(archivos_analizados)
-    for t in titulos_display:
-        presentes = {file for file, titles in found_titles_by_file.items() if t in titles}
-        faltan_en = sorted(files_set - presentes)
-        if faltan_en:
-            f.write(f"- {t}\n")
-            for af in faltan_en:
-                f.write(f"    · No está en: {af}\n")
+def procesar_grouped(archivos: List[Dict],
+                     level: int,
+                     titulos_whitelist: List[str],
+                     enforce_whitelist: bool = False) -> Dict[str, bytes]:
+    """
+    Modo POR TÍTULO: regresa {"<titulo>.docx": bytes, ...} agrupando por ese nivel.
+    """
+    return _merge_grouped_by_title(archivos, level, titulos_whitelist, enforce_whitelist)
 
-print("✅ Proceso finalizado.")
-print(f"📁 Reporte detallado: {reporte_path}")
+# ---------------------------
+# Modo CLI local (opcional)
+# ---------------------------
+
+def _demo_main():
+    """
+    Ejecución local de prueba (opcional). No se llama en servidor.
+    - Lee .docx de ./data_in
+    - Genera ./_out/unificado.docx y ./_out/tablas.xlsx
+      y ./_out/por_titulo/<titulo>.docx
+    """
+    import os
+    from glob import glob
+    in_dir = "./data_in"
+    out_dir = "./_out"
+    os.makedirs(out_dir, exist_ok=True)
+    files = []
+    for p in glob(os.path.join(in_dir, "*.docx")):
+        with open(p, "rb") as f:
+            files.append({"name": os.path.basename(p), "content": f.read()})
+
+    if not files:
+        print("No hay .docx en ./data_in")
+        return
+
+    # Unificado
+    uni = procesar(files, [1,2,3], [], enforce_whitelist=False)
+    with open(os.path.join(out_dir, "unificado.docx"), "wb") as f:
+        f.write(uni["unificado.docx"])
+    with open(os.path.join(out_dir, "tablas.xlsx"), "wb") as f:
+        f.write(uni["tablas.xlsx"])
+    print("Generado unificado.docx y tablas.xlsx")
+
+    # Por título (H1)
+    grouped = procesar_grouped(files, 1, [], enforce_whitelist=False)
+    folder = os.path.join(out_dir, "por_titulo")
+    os.makedirs(folder, exist_ok=True)
+    for fn, data in grouped.items():
+        with open(os.path.join(folder, fn), "wb") as f:
+            f.write(data)
+    print(f"Generados {len(grouped)} archivos por título (H1).")
+
+if __name__ == "__main__":
+    _demo_main()
