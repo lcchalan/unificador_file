@@ -18,10 +18,13 @@ from openpyxl.styles import Font, Alignment
 # ----------------------
 # Rutas
 # ----------------------
-ruta_entrada = "/Users/utpl/Desktop/doc"   # DOCX de entrada
-ruta_salida  = "/Users/utpl/Desktop/doc1"  # salida DOCX/XLSX + reportes
+# Usa variables de entorno si existen; si no, usa rutas locales y seguras
 
-os.makedirs(ruta_salida, exist_ok=True)
+RUTA_ENTRADA = os.getenv("INPUT_DIR", os.path.join(os.getcwd(), "data_in"))
+RUTA_SALIDA  = os.getenv("OUTPUT_DIR", os.path.join(os.getcwd(), "tmp", "out"))
+
+def ensure_dirs():
+    os.makedirs(RUTA_SALIDA, exist_ok=True)
 
 # ----------------------
 # Índice de TÍTULOS (con numeración)
