@@ -8,23 +8,26 @@
 </head>
 <body class="bg-light">
 <div class="container py-4">
-  <h1 class="h3 mb-3">Unificador de Títulos .docx</h1>
+  <h1 class="h4 mb-3">Unificador de Títulos .docx</h1>
 
   <ul class="nav nav-tabs" id="srcTabs" role="tablist">
     <li class="nav-item" role="presentation">
-      <button class="nav-link active" id="tab-folder" data-bs-toggle="tab" data-bs-target="#pane-folder" type="button" role="tab">Carpeta local (OneDrive sincronizado)</button>
+      <button class="nav-link active" id="tab-folder" data-bs-toggle="tab" data-bs-target="#pane-folder" type="button" role="tab">Carpeta en servidor (ruta)</button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-upload" data-bs-toggle="tab" data-bs-target="#pane-upload" type="button" role="tab">Subir .docx</button>
     </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-upload-dir" data-bs-toggle="tab" data-bs-target="#pane-upload-dir" type="button" role="tab">Subir carpeta (.docx)</button>
+    </li>
   </ul>
 
   <div class="tab-content border border-top-0 p-3 bg-white" id="srcPanes">
-    <!-- Carpeta -->
+    <!-- Carpeta en servidor -->
     <div class="tab-pane fade show active" id="pane-folder" role="tabpanel">
       <div class="mb-3">
-        <label class="form-label">Ruta de carpeta</label>
-        <input type="text" class="form-control" id="folder" placeholder="Ej: C:\Users\TuUsuario\OneDrive\CarpetaDocx ó /Users/tu/OneDrive/...">
+        <label class="form-label">Ruta de carpeta (en el servidor/local)</label>
+        <input type="text" class="form-control" id="folder" placeholder="Ej: C:\Users\...\OneDrive\CarpetaDocx ó /Users/...\OneDrive/...">
       </div>
       <div class="form-check mb-3">
         <input class="form-check-input" type="checkbox" id="include_subs" checked>
@@ -33,7 +36,7 @@
       <button class="btn btn-outline-primary" id="btn-scan-folder">Escanear títulos</button>
     </div>
 
-    <!-- Upload -->
+    <!-- Subir archivos sueltos -->
     <div class="tab-pane fade" id="pane-upload" role="tabpanel">
       <div class="mb-3">
         <label class="form-label">Selecciona archivos .docx</label>
@@ -41,53 +44,52 @@
       </div>
       <button class="btn btn-outline-primary" id="btn-scan-upload">Subir y escanear títulos</button>
     </div>
+
+    <!-- Subir carpeta completa -->
+    <div class="tab-pane fade" id="pane-upload-dir" role="tabpanel">
+      <div class="mb-3">
+        <label class="form-label">Selecciona una carpeta con .docx</label>
+        <input class="form-control" type="file" id="folderInput" webkitdirectory directory multiple accept=".docx">
+        <div class="form-text">Se subirán todos los .docx de la carpeta (y subcarpetas).</div>
+      </div>
+      <button class="btn btn-outline-primary" id="btn-scan-upload-dir">Subir carpeta y escanear</button>
+    </div>
   </div>
 
   <hr class="my-4"/>
 
   <div class="row g-3 align-items-end">
-    <div class="col-md-3">
-      <label class="form-label">Nivel</label>
-      <select id="level" class="form-select">
-        <option value="1" selected>H1</option>
-        <option value="2">H2</option>
-        <option value="3">H3</option>
-      </select>
+    <div class="col-md-6">
+      <label class="form-label">Títulos disponibles (whitelist)</label>
+      <select id="whitelist" class="form-select" multiple size="10"></select>
+      <div class="form-text">Selecciona los títulos que quieres incluir (o marca “Usar todos”).</div>
     </div>
-    <div class="col-md-4">
-      <div class="form-check">
+    <div class="col-md-6">
+      <div class="form-check mt-4">
         <input class="form-check-input" type="checkbox" id="use_all" checked>
-        <label class="form-check-label" for="use_all">Usar todos los títulos del nivel</label>
+        <label class="form-check-label" for="use_all">Usar todos los títulos de la lista</label>
       </div>
-    </div>
-    <div class="col-md-5 text-end">
-      <span class="badge bg-secondary" id="badge-archivos">0 archivos</span>
-      <span class="badge bg-secondary" id="badge-titulos">0 títulos</span>
+      <div class="mt-2">
+        <span class="badge bg-secondary" id="badge-archivos">0 archivos</span>
+      </div>
     </div>
   </div>
 
-  <div class="mt-3 row g-4">
-    <div class="col-md-6">
-      <label class="form-label">Títulos encontrados</label>
-      <select id="titles" class="form-select" multiple size="12"></select>
-      <div class="form-text">Si “Usar todos” está marcado, esta selección se ignora.</div>
-    </div>
-    <div class="col-md-6">
-      <label class="form-label">Archivos detectados</label>
-      <div class="table-responsive border rounded">
-        <table class="table table-sm align-middle mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Archivo</th>
-              <th class="text-center"># Títulos</th>
-              <th class="text-end">Acción</th>
-            </tr>
-          </thead>
-          <tbody id="files-table">
-            <tr><td colspan="3" class="text-muted small p-3">Sin datos. Escanea primero.</td></tr>
-          </tbody>
-        </table>
-      </div>
+  <div class="mt-3">
+    <label class="form-label">Archivos detectados</label>
+    <div class="table-responsive border rounded">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Archivo</th>
+            <th class="text-center"># Títulos (coincidentes)</th>
+            <th class="text-end">Acción</th>
+          </tr>
+        </thead>
+        <tbody id="files-table">
+          <tr><td colspan="3" class="text-muted small p-3">Sin datos. Escanea primero.</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -98,7 +100,7 @@
     </div>
     <div class="form-check">
       <input class="form-check-input" type="radio" name="mode" id="mode_grouped" value="grouped">
-      <label class="form-check-label" for="mode_grouped">Un archivo por título (A.docx, B.docx…) → ZIP</label>
+      <label class="form-check-label" for="mode_grouped">Por título (1 .docx por cada título) → ZIP</label>
     </div>
   </div>
 
@@ -117,8 +119,8 @@
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Títulos del archivo</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        <h5 class="modal-title">Títulos del archivo (coincidentes)</h5>
+        <button class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
       </div>
       <div class="modal-body">
         <p class="text-muted small" id="preview-file"></p>
@@ -132,6 +134,266 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script src="/static/app.js"></script>
+<script>
+(() => {
+// ====== UTIL ======
+const $ = (sel) => document.querySelector(sel);
+const log = (m) => { const el = $("#log"); el.textContent += (m + "\\n"); el.scrollTop = el.scrollHeight; };
+
+let uploadToken = null;    // para "subir .docx"
+let uploadDirToken = null; // para "subir carpeta"
+let lastSource = "folder"; // folder | upload | upload_dir
+let lastFilesMeta = [];    // [{name, count, titles}]
+
+// ====== WHITELIST (tu lista fija) ======
+const TITULOS_WHITELIST = [
+  "1. Introducción​",
+  "2. Diagnóstico estratégico",
+  "3. Misión, visión y valores de la carrera",
+  "01. Plan de formación integral del estudiante",
+  "06. Plan de admisión, acogida y acompañamiento académico de estudiantes",
+  "23. Plan de seguimiento y mejora de indicadores del perfil docente",
+  "25. Plan de formación integral del docente",
+  "26. Plan de mejora del proceso de evaluación integral docente ",
+  "03. Plan implantación del marco de competencias UTPL",
+  "04. Plan de prospectiva y creación de nueva oferta",
+  "07. Plan de acciones curriculares para el fortalecimiento de las competencias genéricas",
+  "11. Plan de fortalecimiento de prácticas preprofesionales y proyectos de vinculación",
+  "12. Plan de fortalecimiento de criterios para la evaluación de la calidad de carreras y programas académicos",
+  "13. Plan de acciones curriculares para el fortalecimiento de la empleabilidad del graduado UTPL",
+  "16. Plan de mejora del proceso de elaboración y seguimiento de planes docentes",
+  "18. Plan de mejora de ambientes de aprendizaje",
+  "19. Plan de mejora de evaluación de los aprendizajes",
+  "20. Plan de mejora del proceso de integración curricular",
+  "21. Plan de mejora del proceso de titulación",
+  "22. Plan de seguimiento y mejora de la labor tutorial",
+  "08. Plan de internacionalización del currículo",
+  "24. Plan de intervención de personal académico en territorio",
+  "05. Plan de acciones académicas orientadas a la comunicación y promoción de la oferta",
+  "09. Plan de innovación educativa",
+  "10. Plan de implantación de metodologías activas en el currículo",
+  "28. Plan de formación de líderes académicos ",
+  "29. Plan de posicionamiento institucional en innovación educativa",
+  "30. Plan de investigación sobre innovación educativa, EaD, MP"
+];
+
+function setBadges(filesCount) {
+  $("#badge-archivos").textContent = `${filesCount} archivo${filesCount===1?"":"s"}`;
+}
+function fillWhitelist() {
+  const sel = $("#whitelist");
+  sel.innerHTML = "";
+  TITULOS_WHITELIST.forEach(t => {
+    const o = document.createElement("option");
+    o.value = t; o.textContent = t;
+    sel.appendChild(o);
+  });
+}
+function drawFilesTable(filesMeta) {
+  const tbody = $("#files-table");
+  tbody.innerHTML = "";
+  if (!filesMeta.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="text-muted small p-3">Sin datos. Escanea primero.</td></tr>`;
+    return;
+  }
+  for (const f of filesMeta) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="small">${f.name}</td>
+      <td class="text-center"><span class="badge ${f.count>0?"bg-primary":"bg-secondary"}">${f.count}</span></td>
+      <td class="text-end">
+        <button class="btn btn-sm btn-outline-secondary" data-action="preview" data-name="\${encodeURIComponent(f.name)}">Ver títulos</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+function showPreview(name) {
+  const decoded = decodeURIComponent(name);
+  const meta = lastFilesMeta.find(x => x.name === decoded);
+  $("#preview-file").textContent = decoded;
+  const ul = $("#preview-list");
+  ul.innerHTML = "";
+  if (!meta || !meta.titles || !meta.titles.length) {
+    ul.innerHTML = `<li class="list-group-item text-muted">Sin coincidencias con la whitelist.</li>`;
+  } else {
+    meta.titles.forEach(t => {
+      const li = document.createElement("li");
+      li.className = "list-group-item small";
+      li.textContent = t;
+      ul.appendChild(li);
+    });
+  }
+  const modal = new bootstrap.Modal(document.getElementById('modalPreview'));
+  modal.show();
+}
+
+// ====== SCANs ======
+async function scanFolder() {
+  lastSource = "folder"; uploadToken = null; uploadDirToken = null;
+  $("#whitelist").selectedIndex = -1;
+  drawFilesTable([]); setBadges(0);
+  log("Escaneando carpeta en servidor...");
+
+  const body = {
+    folder: $("#folder").value.trim(),
+    include_subs: $("#include_subs").checked,
+    whitelist: TITULOS_WHITELIST
+  };
+  const res = await fetch("/api/scan-folder", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const js = await res.json();
+  if (!js.ok) { log("ERROR: " + (js.error || res.status)); return; }
+  lastFilesMeta = js.files_meta || [];
+  setBadges(js.count || 0);
+  drawFilesTable(lastFilesMeta);
+  log(`Archivos: ${js.count} | whitelist: ${TITULOS_WHITELIST.length} títulos`);
+}
+
+async function scanUpload() {
+  lastSource = "upload"; uploadDirToken = null;
+  $("#whitelist").selectedIndex = -1;
+  drawFilesTable([]); setBadges(0);
+  const files = $("#files").files;
+  if (!files || !files.length) { log("Selecciona .docx primero."); return; }
+  log(`Subiendo ${files.length} archivo(s)...`);
+  const fd = new FormData();
+  TITULOS_WHITELIST.forEach(t => fd.append("whitelist[]", t));
+  for (const f of files) fd.append("files", f);
+
+  const res = await fetch("/api/scan-upload", { method: "POST", body: fd });
+  const js = await res.json();
+  if (!js.ok) { log("ERROR: " + (js.error || res.status)); return; }
+  uploadToken = js.token;
+  lastFilesMeta = js.files_meta || [];
+  setBadges(js.count || 0);
+  drawFilesTable(lastFilesMeta);
+  log(`Token: ${uploadToken} | Archivos: ${js.count}`);
+}
+
+async function scanUploadDir() {
+  lastSource = "upload_dir"; uploadToken = null;
+  $("#whitelist").selectedIndex = -1;
+  drawFilesTable([]); setBadges(0);
+  const files = $("#folderInput").files;
+  if (!files || !files.length) { log("Selecciona una carpeta con .docx."); return; }
+  log(`Subiendo carpeta con ${files.length} archivo(s)...`);
+  const fd = new FormData();
+  TITULOS_WHITELIST.forEach(t => fd.append("whitelist[]", t));
+  for (const f of files) {
+    if (f.name.toLowerCase().endsWith(".docx")) fd.append("files", f);
+  }
+  const res = await fetch("/api/scan-upload", { method: "POST", body: fd });
+  const js = await res.json();
+  if (!js.ok) { log("ERROR: " + (js.error || res.status)); return; }
+  uploadDirToken = js.token;
+  lastFilesMeta = js.files_meta || [];
+  setBadges(js.count || 0);
+  drawFilesTable(lastFilesMeta);
+  log(`Token: ${uploadDirToken} | Archivos: ${js.count}`);
+}
+
+// ====== MERGE / CLEANUP ======
+async function mergeNow() {
+  const mode = document.querySelector('input[name="mode"]:checked').value; // unificado | grouped
+  const use_all = $("#use_all").checked;
+  let selected = [];
+  if (!use_all) {
+    selected = Array.from($("#whitelist").selectedOptions).map(o => o.value);
+    if (!selected.length) { log("Selecciona al menos un título o marca 'Usar todos'."); return; }
+  } else {
+    selected = TITULOS_WHITELIST.slice();
+  }
+
+  const payload = { source: lastSource, mode, titles: selected };
+
+  if (lastSource === "folder") {
+    const folder = $("#folder").value.trim();
+    if (!folder) { log("Ingresa la ruta de la carpeta."); return; }
+    payload.folder = folder;
+    payload.include_subs = $("#include_subs").checked;
+  } else if (lastSource === "upload") {
+    if (!uploadToken) { log("Primero sube y escanea archivos."); return; }
+    payload.token = uploadToken;
+  } else {
+    if (!uploadDirToken) { log("Primero sube y escanea la carpeta."); return; }
+    payload.token = uploadDirToken;
+  }
+
+  log("Generando ZIP...");
+  const res = await fetch("/api/merge", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    const js = await res.json().catch(()=>({ok:false,error:res.statusText}));
+    log("ERROR: " + (js.error || res.status));
+    return;
+  }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = (mode === "unificado" ? "unificado.zip" : "por_titulo.zip");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  log("Descarga iniciada.");
+}
+
+async function cleanup() {
+  const token = uploadToken || uploadDirToken;
+  if (!token) { log("No hay subidas por limpiar."); return; }
+  await fetch("/api/cleanup", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token })
+  });
+  uploadToken = null; uploadDirToken = null;
+  log("Subidas temporales limpiadas.");
+}
+
+// ====== Eventos ======
+document.addEventListener("DOMContentLoaded", () => {
+  fillWhitelist();
+  $("#btn-scan-folder").addEventListener("click", scanFolder);
+  $("#btn-scan-upload").addEventListener("click", scanUpload);
+  $("#btn-scan-upload-dir").addEventListener("click", scanUploadDir);
+  $("#btn-merge").addEventListener("click", mergeNow);
+  $("#btn-clean").addEventListener("click", cleanup);
+
+  $("#files-table").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-action='preview']");
+    if (!btn) return;
+    const name = btn.dataset.name;
+    const decoded = decodeURIComponent(name);
+    const meta = lastFilesMeta.find(x => x.name === decoded);
+    $("#preview-file").textContent = decoded;
+    const ul = $("#preview-list");
+    ul.innerHTML = "";
+    if (!meta || !meta.titles || !meta.titles.length) {
+      ul.innerHTML = `<li class="list-group-item text-muted">Sin coincidencias con la whitelist.</li>`;
+    } else {
+      meta.titles.forEach(t => {
+        const li = document.createElement("li");
+        li.className = "list-group-item small";
+        li.textContent = t;
+        ul.appendChild(li);
+      });
+    }
+    const modal = new bootstrap.Modal(document.getElementById('modalPreview'));
+    modal.show();
+  });
+
+  $("#use_all").addEventListener("change", (e) => {
+    if (e.target.checked) {
+      for (const opt of $("#whitelist").options) opt.selected = false;
+    }
+  });
+});
+})();
+</script>
 </body>
 </html>
