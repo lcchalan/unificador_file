@@ -399,6 +399,29 @@ def procesar_grouped(archivos: List[Dict],
     Modo POR TÍTULO: regresa {"<titulo>.docx": bytes, ...} agrupando por ese nivel.
     """
     return _merge_grouped_by_title(archivos, level, titulos_whitelist, enforce_whitelist)
+def _merge_grouped_by_title(archivos: List[Dict], title_exact: str) -> Dict[str, bytes]:
+    """
+    Crea 1 DOCX con el contenido de TODOS los documentos que tengan ese título (en cualquier nivel).
+    Retorna {"<titulo>.docx": bytes}
+    """
+    tnorm = _normalize_text(title_exact)
+    d = Document()
+    d.add_heading(title_exact, level=0)
+
+    got = False
+    for item in archivos:
+        src = item.get("name", "archivo.docx")
+        doc = _to_docx(item["content"])
+        # buscamos secciones para TODOS los niveles (1..9)
+        sections = _split_sections_by_levels(doc, list(range(1,10)))
+        for sec in sections:
+            if _normalize_text(sec["title"]) == tnorm:
+                _append_section_to_doc(d, src, sec)
+                got = True
+
+    if not got:
+        return {}
+    return { _sanitize_filename(f"{title_exact}.docx"): _save_docx_to_bytes(d) }
 
 # ---------------------------
 # Modo CLI local (opcional)
