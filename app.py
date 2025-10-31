@@ -4,7 +4,7 @@ from typing import List, Dict
 from flask import Flask, render_template, request, jsonify, send_file
 
 # === Tu lógica existente ===
-from lector_word import procesar, procesar_grouped, headings_from_docx
+from lector_file import procesar, procesar_grouped, headings_from_docx
 
 app = Flask(__name__)
 
